@@ -1,0 +1,2198 @@
+#Project ini akan membandingkan gen antara subtipe kanker payudara dari dua dataset
+# ======================
+# 1. Install BiocManager
+# ======================
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+# ======================
+# 2. Install paket Bioconductor
+# ======================
+bioc_pkgs <- c(
+  "GEOquery",
+  "limma",
+  "hgu133plus2.db",   # sesuai GPL570
+  "AnnotationDbi",
+  "Biobase"
+)
+
+for (pkg in bioc_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    BiocManager::install(pkg, ask = FALSE, update = FALSE)
+  }
+}
+
+# ======================
+# 3. Install paket CRAN
+# ======================
+cran_pkgs <- c("pheatmap", "ggplot2", "dplyr", "umap")
+
+for (pkg in cran_pkgs) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# ======================
+# 4. Library
+# ======================
+
+library(GEOquery)
+library(Biobase)
+library(limma)
+
+library(hgu133plus2.db)   # sesuai GPL570
+library(AnnotationDbi)
+
+library(ggplot2)
+library(dplyr)
+library(pheatmap)
+library(umap)
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+
+library(gridExtra)
+library(grid)
+
+# ======================
+# 5. PENGAMBILAN DATA DARI GEO
+# ======================
+
+#tambahkan perintah timeout, agar jika data yang di unduh sangat besar, R tidak berhenti
+options(timeout = 600)  # 10 menit
+
+# Unduh GSE65194
+gset1_list <- getGEO("GSE65194", GSEMatrix = TRUE, AnnotGPL = TRUE)
+gset1 <- gset1_list[[1]]
+
+# Unduh GSE45827
+gset2_list <- getGEO("GSE45827", GSEMatrix = TRUE, AnnotGPL = TRUE)
+gset2 <- gset2_list[[1]]
+
+# ExpressionSet berisi:
+# - exprs() : matriks ekspresi gen
+# - pData() : metadata sampel
+# - fData() : metadata fitur (probe / gen)
+
+# ======================
+# 6. PRE-PROCESSING DATA EKSPRESI
+# ======================
+
+ex1 <- exprs(gset1)
+ex2 <- exprs(gset2)
+fdata1 <- fData(gset1)
+fdata2 <- fData(gset2)
+pdata1 <- pData(gset1)
+pdata2 <- pData(gset2)
+
+output_folder <- "Dataset"
+if (!dir.exists(output_folder)) {
+  dir.create(output_folder)
+}
+
+#FILE EXCEL
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+library(openxlsx)
+#=======================
+wb1 <- createWorkbook()
+addWorksheet(wb1, "Expression")
+writeData(wb1, "Expression", ex1)
+addWorksheet(wb1, "Metadata")
+writeData(wb1, "Metadata", pdata1)
+addWorksheet(wb1, "Feature")
+writeData(wb1, "Feature", fdata1)
+saveWorkbook(wb1, file = file.path(output_folder, "GSE65194_Dataset.xlsx"), overwrite = TRUE)
+
+wb2 <- createWorkbook()
+addWorksheet(wb2, "Expression")
+writeData(wb2, "Expression", ex2)
+addWorksheet(wb2, "Metadata")
+writeData(wb2, "Metadata", pdata2)
+addWorksheet(wb2, "Feature")
+writeData(wb2, "Feature", fdata2)
+saveWorkbook(wb2, file = file.path(output_folder, "GSE45827_Dataset.xlsx"), overwrite = TRUE)
+
+cat("Selesai! Semua file Excel tersimpan di folder:", output_folder, "\n")
+
+# ======================
+# Ekstrak matriks ekspresi
+# ======================
+
+#Apabila  rentang nilai ekspresi menunjukkan karakteristik data belum terlogaritma
+# ======================
+# Cek & lakukan log2 transform (GSE65194)
+# ======================
+qx1 <- as.numeric(quantile(ex1, c(0, 0.25, 0.5, 0.75, 0.99, 1), na.rm = TRUE))
+LogTransform1 <- (qx1[5] > 100) || (qx1[6] - qx1[1] > 50 && qx1[2] > 0)
+
+if (LogTransform1) {
+  ex1[ex1 <= 0] <- NA
+  ex1 <- log2(ex1)
+}
+
+# ======================
+# Cek & lakukan log2 transform (GSE45827)
+# ======================
+qx2 <- as.numeric(quantile(ex2, c(0, 0.25, 0.5, 0.75, 0.99, 1), na.rm = TRUE))
+LogTransform2 <- (qx2[5] > 100) || (qx2[6] - qx2[1] > 50 && qx2[2] > 0)
+
+if (LogTransform2) {
+  ex2[ex2 <= 0] <- NA
+  ex2 <- log2(ex2)
+}
+
+# ==============================
+# GSE65194 – CLEAN + COLLAPSE PROBE → GENE
+# ==============================
+
+fdata1 <- fData(gset1)
+
+# Ambil gene symbol
+gene_symbols1 <- fdata1$`Gene symbol`
+
+# 🔥 CLEAN multi-gene DULU
+gene_symbols1_clean <- sapply(strsplit(gene_symbols1, "///"), `[`, 1)
+
+# Trim spasi
+gene_symbols1_clean <- trimws(gene_symbols1_clean)
+
+# Buang NA dan kosong
+keep_probe1 <- !is.na(gene_symbols1_clean) & gene_symbols1_clean != ""
+
+ex1_valid <- as.matrix(ex1[keep_probe1, ])
+gene_symbols1_valid <- gene_symbols1_clean[keep_probe1]
+
+# Collapse SEKALI SAJA
+ex1_gene <- avereps(ex1_valid, ID = gene_symbols1_valid)
+
+cat("Sebelum collapse:", dim(ex1), "\n")
+cat("Setelah collapse:", dim(ex1_gene), "\n")
+
+sum(duplicated(rownames(ex1_gene)))  # HARUS 0
+any(duplicated(rownames(ex1_gene)))  # harus FALSE
+
+# ==============================
+# GSE45827 – CLEAN + COLLAPSE
+# ==============================
+
+fdata2 <- fData(gset2)
+
+gene_symbols2 <- fdata2$`Gene symbol`
+
+# 🔥 CLEAN multi-gene DULU
+gene_symbols2_clean <- sapply(strsplit(gene_symbols2, "///"), `[`, 1)
+gene_symbols2_clean <- trimws(gene_symbols2_clean)
+
+keep_probe2 <- !is.na(gene_symbols2_clean) & gene_symbols2_clean != ""
+
+ex2_valid <- as.matrix(ex2[keep_probe2, ])
+gene_symbols2_valid <- gene_symbols2_clean[keep_probe2]
+
+ex2_gene <- avereps(ex2_valid, ID = gene_symbols2_valid)
+
+cat("Sebelum collapse:", dim(ex2), "\n")
+cat("Setelah collapse:", dim(ex2_gene), "\n")
+
+sum(duplicated(rownames(ex2_gene)))  # HARUS 0
+
+any(duplicated(rownames(ex2_gene)))  # harus FALSE
+
+# ======================
+# 7. DEFINISI KELOMPOK SAMPEL (MULTI-GROUP)
+# ======================
+
+# Ambil metadata
+pdata1 <- pData(gset1)
+
+# Cek kolom yang berisi subtype
+colnames(pdata1)
+
+# Misalnya subtype ada di "source_name_ch1"
+group_info1 <- pdata1$source_name_ch1
+
+# Ubah menjadi faktor
+gset1$group <- factor(group_info1)
+
+# Lihat semua subtype
+levels(gset1$group)
+
+table(gset1$group)
+
+#========================
+#gset2
+# Ambil metadata
+pdata2 <- pData(gset2)
+
+# Cek kolom yang berisi subtype
+colnames(pdata2)
+
+# Misalnya subtype ada di "source_name_ch1"
+group_info2 <- pdata2$source_name_ch1
+
+# Ubah menjadi faktor
+gset2$group <- factor(group_info2)
+
+# Lihat semua subtype
+levels(gset2$group)
+
+table(gset2$group)
+
+# ======================
+# GSE65194 – Filter tumor primer + healthy saja
+# ======================
+
+#karena dataset mencakup sel line, maka perlu filter sampel
+group_raw1 <- as.character(gset1$group)   # 🔴 ubah ke character dulu
+
+keep1 <- group_raw1 %in% c(
+  "Breast tumor sample from IHC defined Luminal A subgroup",
+  "Breast tumor sample from IHC defined Luminal B subgroup",
+  "Breast tumor sample from IHC defined Er- Her2+ subgroup",
+  "Breast tumor sample from IHC defined Triple Negative subgroup",
+  "Healthy breast sample from mammoplasty surgery"
+)
+
+gset1_filtered <- gset1[, keep1]
+ex1_gene_filtered <- ex1_gene[, keep1]
+
+group1_clean <- group_raw1[keep1]
+
+# Ganti label
+group1_clean[group1_clean ==
+               "Breast tumor sample from IHC defined Luminal A subgroup"] <- "LuminalA"
+
+group1_clean[group1_clean ==
+               "Breast tumor sample from IHC defined Luminal B subgroup"] <- "LuminalB"
+
+group1_clean[group1_clean ==
+               "Breast tumor sample from IHC defined Er- Her2+ subgroup"] <- "HER2"
+
+group1_clean[group1_clean ==
+               "Breast tumor sample from IHC defined Triple Negative subgroup"] <- "TNBC"
+
+group1_clean[group1_clean ==
+               "Healthy breast sample from mammoplasty surgery"] <- "Normal"
+
+# Jadikan factor kembali
+gset1_filtered$group <- factor(group1_clean)
+
+levels(gset1_filtered$group)
+
+table(gset1_filtered$group)
+
+# ======================
+# GSE45827 – Filter tumor primer + normal
+# ======================
+
+# Ubah ke character dulu
+group_raw2 <- as.character(gset2$group)
+
+# Pilih hanya subtype tumor primer + normal
+keep2 <- group_raw2 %in% c(
+  "Human Luminal A Tumor Sample",
+  "Human Luminal B Tumor Sample",
+  "Human Her2 Tumor Sample",
+  "Human Basal Tumor Sample",
+  "Human Normal"
+)
+
+gset2_filtered <- gset2[, keep2]
+ex2_gene_filtered <- ex2_gene[, keep2]
+
+group2_clean <- group_raw2[keep2]
+
+# Ganti label menjadi sederhana
+group2_clean[group2_clean == 
+               "Human Luminal A Tumor Sample"] <- "LuminalA"
+
+group2_clean[group2_clean == 
+               "Human Luminal B Tumor Sample"] <- "LuminalB"
+
+group2_clean[group2_clean == 
+               "Human Her2 Tumor Sample"] <- "HER2"
+
+group2_clean[group2_clean == 
+               "Human Basal Tumor Sample"] <- "Basal"
+
+group2_clean[group2_clean == 
+               "Human Normal"] <- "Normal"
+
+# Jadikan factor kembali
+gset2_filtered$group <- factor(group2_clean)
+
+levels(gset2_filtered$group)
+
+table(gset2_filtered$group)
+
+
+# ======================
+# 8. DESIGN MATRIX
+# ======================
+
+group1 <- gset1_filtered$group
+
+design1 <- model.matrix(~0 + group1)
+colnames(design1) <- levels(group1)
+
+design1
+#HER2 LuminalA LuminalB Normal TNBC
+
+contrast1 <- makeContrasts(
+  LuminalA_vs_Normal = LuminalA - Normal,
+  LuminalB_vs_Normal = LuminalB - Normal,
+  HER2_vs_Normal     = HER2 - Normal,
+  TNBC_vs_Normal    = TNBC - Normal,
+  levels = design1
+)
+
+contrast1
+head(rownames(ex1_gene_filtered))
+#===============================
+group2 <- gset2_filtered$group
+
+design2 <- model.matrix(~0 + group2)
+colnames(design2) <- levels(group2)
+
+design2
+
+contrast2 <- makeContrasts(
+  LuminalA_vs_Normal = LuminalA - Normal,
+  LuminalB_vs_Normal = LuminalB - Normal,
+  HER2_vs_Normal     = HER2 - Normal,
+  Basal_vs_Normal    = Basal - Normal,
+  levels = design2
+)
+contrast2
+
+head(rownames(ex2_gene_filtered))
+
+# ======================
+# 9. LIMMA
+# ======================
+# ======================
+# LIMMA - GSE65194
+# ======================
+
+# Rename object agar konsisten
+expr_gse65194   <- ex1_gene_filtered
+design_gse65194 <- design1
+contrast_gse65194 <- contrast1
+
+# 1.Fit linear model
+fit1 <- lmFit(ex1_gene_filtered, design1)
+
+# 2.Apply contrast matrix (yang sudah kita buat tadi)
+fit1_contrast <- contrasts.fit(fit1, contrast1)
+
+# 3️.Empirical Bayes
+fit1_contrast <- eBayes(fit1_contrast)
+
+# 4️.Ambil hasil per subtype
+res_LuminalA  <- topTable(fit1_contrast,
+                          coef="LuminalA_vs_Normal",
+                          adjust="fdr",
+                          number=Inf,
+                          p.value=0.01)
+
+res_LuminalB  <- topTable(fit1_contrast,
+                          coef="LuminalB_vs_Normal",
+                          adjust="fdr",
+                          number=Inf,
+                          p.value=0.01)
+
+res_HER2      <- topTable(fit1_contrast,
+                          coef="HER2_vs_Normal",
+                          adjust="fdr",
+                          number=Inf,
+                          p.value=0.01)
+
+res_TNBC     <- topTable(fit1_contrast,
+                         coef="TNBC_vs_Normal",
+                         adjust="fdr",
+                         number=Inf,
+                         p.value=0.01)
+
+# Tambahkan SYMBOL
+res_LuminalA$SYMBOL <- rownames(res_LuminalA)
+res_LuminalB$SYMBOL <- rownames(res_LuminalB)
+res_HER2$SYMBOL     <- rownames(res_HER2)
+res_TNBC$SYMBOL    <- rownames(res_TNBC)
+
+head(rownames(ex1_gene_filtered))
+
+# ======================
+# LIMMA - GSE45827
+# ======================
+
+# Rename object agar konsisten
+expr_gse45827     <- ex2_gene_filtered
+design_gse45827   <- design2
+contrast_gse45827 <- contrast2
+
+# 1. Fit model
+fit_gse45827 <- lmFit(expr_gse45827, design_gse45827)
+
+# 2️.Apply contrast
+fit_gse45827 <- contrasts.fit(fit_gse45827, contrast_gse45827)
+
+# 3️.Empirical Bayes
+fit_gse45827 <- eBayes(fit_gse45827)
+
+# 4️.Ambil hasil per subtype
+res2_LuminalA <- topTable(fit_gse45827,
+                          coef="LuminalA_vs_Normal",
+                          adjust="fdr",
+                          number=Inf,
+                          p.value=0.01)
+
+res2_LuminalB <- topTable(fit_gse45827,
+                          coef="LuminalB_vs_Normal",
+                          adjust="fdr",
+                          number=Inf,
+                          p.value=0.01)
+
+res2_HER2 <- topTable(fit_gse45827,
+                      coef="HER2_vs_Normal",
+                      adjust="fdr",
+                      number=Inf,
+                      p.value=0.01)
+
+res2_Basal <- topTable(fit_gse45827,
+                       coef="Basal_vs_Normal",
+                       adjust="fdr",
+                       number=Inf,
+                       p.value=0.01)
+
+# Tambahkan SYMBOL
+res2_LuminalA$SYMBOL <- rownames(res2_LuminalA)
+res2_LuminalB$SYMBOL <- rownames(res2_LuminalB)
+res2_HER2$SYMBOL     <- rownames(res2_HER2)
+res2_Basal$SYMBOL    <- rownames(res2_Basal)
+
+head(rownames(ex2_gene_filtered))
+
+# ======================
+# 10. BOXPLOT 
+# ======================
+# ======================
+# BOXPLOT - GSE65194
+# ======================
+
+ord1 <- order(gset1_filtered$group)
+
+ex1_ordered <- ex1_gene_filtered[, ord1]
+group1_ordered <- gset1_filtered$group[ord1]
+
+group_colors1 <- as.numeric(group1_ordered)
+
+par(mar = c(8,4,4,8))
+
+boxplot(
+  ex1_ordered,
+  col = group_colors1,
+  las = 2,
+  outline = FALSE,
+  main = "Boxplot Distribusi Ekspresi - GSE65194",
+  ylab = "Expression Value (log2)"
+)
+
+legend(
+  "right",
+  inset = c(-0.25, 0),
+  legend = levels(group1_ordered),
+  fill = seq_along(levels(group1_ordered)),
+  cex = 0.7,
+  xpd = TRUE
+)
+# ======================
+# BOXPLOT - GSE45827 
+# ======================
+
+# Urutkan berdasarkan grup
+ord2 <- order(gset2_filtered$group)
+
+ex2_ordered <- ex2_gene_filtered[, ord2]
+group2_ordered <- gset2_filtered$group[ord2]
+
+group_colors2 <- as.numeric(group2_ordered)
+
+par(mar = c(8,4,4,8))
+
+boxplot(
+  ex2_ordered,
+  col = group_colors2,
+  las = 2,
+  outline = FALSE,
+  main = "Boxplot Distribusi Ekspresi - GSE45827",
+  ylab = "Expression Value (log2)"
+)
+
+legend(
+  "right",
+  inset = c(-0.25, 0),
+  legend = levels(group2_ordered),
+  fill = seq_along(levels(group2_ordered)),
+  cex = 0.7,
+  xpd = TRUE
+)
+
+# ======================
+# 11. DENSITY PLOT 
+# ======================
+# ======================
+# DENSITY PLOT - GSE65194 
+# ======================
+
+expr_long1 <- data.frame(
+  Expression = as.vector(ex1_gene_filtered),
+  Group = rep(gset1_filtered$group,
+              each = nrow(ex1_gene_filtered))
+)
+
+p1 <- ggplot(expr_long1, aes(x = Expression, color = Group)) +
+  geom_density(linewidth = 1.2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Distribusi Nilai Ekspresi Gen - GSE65194",
+    x = "Expression Value (log2)",
+    y = "Density"
+  )
+print(p1)
+ggsave(
+  "Density_GSE65194_HD.png",
+  plot = p1,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# DENSITY PLOT - GSE45827
+# ======================
+
+expr_long2 <- data.frame(
+  Expression = as.vector(ex2_gene_filtered),
+  Group = rep(gset2_filtered$group,
+              each = nrow(ex2_gene_filtered))
+)
+
+p2 <- ggplot(expr_long2, aes(x = Expression, color = Group)) +
+  geom_density(linewidth = 1.2) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Distribusi Nilai Ekspresi Gen - GSE45827",
+    x = "Expression Value (log2)",
+    y = "Density"
+  )
+
+# Tampilkan di Plot Window
+print(p2)
+
+# Simpan HD
+ggsave(
+  "Density_GSE45827_HD.png",
+  plot = p2,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# 12. UMAP 
+# ======================
+# ======================
+# UMAP - GSE65194
+# ======================
+
+set.seed(123)
+
+umap_input1 <- t(ex1_gene_filtered)
+
+umap_result1 <- umap(umap_input1)
+
+umap_df1 <- data.frame(
+  UMAP1 = umap_result1$layout[, 1],
+  UMAP2 = umap_result1$layout[, 2],
+  Group = gset1_filtered$group
+)
+
+p_umap1 <- ggplot(umap_df1, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "UMAP Plot Sampel - GSE65194",
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
+
+# Tampilkan di Plot Window
+print(p_umap1)
+
+# Simpan HD
+ggsave(
+  "UMAP_GSE65194_HD.png",
+  plot = p_umap1,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# UMAP - GSE45827
+# ======================
+
+set.seed(123)
+
+umap_input2 <- t(ex2_gene_filtered)
+
+umap_result2 <- umap(umap_input2)
+
+umap_df2 <- data.frame(
+  UMAP1 = umap_result2$layout[, 1],
+  UMAP2 = umap_result2$layout[, 2],
+  Group = gset2_filtered$group
+)
+
+p_umap2 <- ggplot(umap_df2, aes(x = UMAP1, y = UMAP2, color = Group)) +
+  geom_point(size = 3, alpha = 0.8) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "UMAP Plot Sampel - GSE45827",
+    x = "UMAP 1",
+    y = "UMAP 2"
+  )
+
+# Tampilkan di Plot Window
+print(p_umap2)
+
+# Simpan HD
+ggsave(
+  "UMAP_GSE45827_HD.png",
+  plot = p_umap2,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# 13. VOLCANO PLOT 
+# ======================
+# ======================
+# VOLCANO PLOT - GSE65194 (LuminalA)
+# ======================
+
+volcano_data1 <- data.frame(
+  logFC = res_LuminalA$logFC,
+  adj.P.Val = res_LuminalA$adj.P.Val,
+  Gene = res_LuminalA$SYMBOL
+)
+
+volcano_data1$status <- "NO"
+
+volcano_data1$status[
+  volcano_data1$logFC > 1 & volcano_data1$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data1$status[
+  volcano_data1$logFC < -1 & volcano_data1$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol1 <- ggplot(volcano_data1,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE65194 (LuminalA vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+# Tampilkan di Plot Window
+print(p_vol1)
+
+# Simpan HD
+ggsave(
+  "Volcano_GSE65194_LuminalA_HD.png",
+  plot = p_vol1,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# VOLCANO PLOT - GSE65194 (LuminalB)
+# ======================
+
+volcano_data1 <- data.frame(
+  logFC = res_LuminalB$logFC,
+  adj.P.Val = res_LuminalB$adj.P.Val,
+  Gene = res_LuminalB$SYMBOL
+)
+
+volcano_data1$status <- "NO"
+
+volcano_data1$status[
+  volcano_data1$logFC > 1 & volcano_data1$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data1$status[
+  volcano_data1$logFC < -1 & volcano_data1$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol1 <- ggplot(volcano_data1,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE65194 (LuminalB vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+print(p_vol1)
+
+ggsave(
+  "Volcano_GSE65194_LuminalB_HD.png",
+  plot = p_vol1,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# VOLCANO PLOT - GSE65194 (HER2)
+# ======================
+
+volcano_data1 <- data.frame(
+  logFC = res_HER2$logFC,
+  adj.P.Val = res_HER2$adj.P.Val,
+  Gene = res_HER2$SYMBOL
+)
+
+volcano_data1$status <- "NO"
+
+volcano_data1$status[
+  volcano_data1$logFC > 1 & volcano_data1$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data1$status[
+  volcano_data1$logFC < -1 & volcano_data1$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol1 <- ggplot(volcano_data1,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE65194 (HER2 vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+print(p_vol1)
+
+ggsave(
+  "Volcano_GSE65194_HER2_HD.png",
+  plot = p_vol1,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# VOLCANO PLOT - GSE65194 (TNBC)
+# ======================
+
+volcano_data1 <- data.frame(
+  logFC = res_TNBC$logFC,
+  adj.P.Val = res_TNBC$adj.P.Val,
+  Gene = res_TNBC$SYMBOL
+)
+
+volcano_data1$status <- "NO"
+
+volcano_data1$status[
+  volcano_data1$logFC > 1 & volcano_data1$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data1$status[
+  volcano_data1$logFC < -1 & volcano_data1$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol1 <- ggplot(volcano_data1,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE65194 (TNBC vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+print(p_vol1)
+
+ggsave(
+  "Volcano_GSE65194_TNBC_HD.png",
+  plot = p_vol1,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+# ======================
+# VOLCANO PLOT - GSE45827 (LuminalA)
+# ======================
+
+volcano_data2 <- data.frame(
+  logFC = res2_LuminalA$logFC,
+  adj.P.Val = res2_LuminalA$adj.P.Val,
+  Gene = res2_LuminalA$SYMBOL
+)
+
+volcano_data2$status <- "NO"
+
+volcano_data2$status[
+  volcano_data2$logFC > 1 & volcano_data2$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data2$status[
+  volcano_data2$logFC < -1 & volcano_data2$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol2 <- ggplot(volcano_data2,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE45827 (LuminalA vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+print(p_vol2)
+
+ggsave(
+  "Volcano_GSE45827_LuminalA_HD.png",
+  plot = p_vol2,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# VOLCANO PLOT - GSE45827 (LuminalB)
+# ======================
+
+volcano_data2 <- data.frame(
+  logFC = res2_LuminalB$logFC,
+  adj.P.Val = res2_LuminalB$adj.P.Val,
+  Gene = res2_LuminalB$SYMBOL
+)
+
+volcano_data2$status <- "NO"
+
+volcano_data2$status[
+  volcano_data2$logFC > 1 & volcano_data2$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data2$status[
+  volcano_data2$logFC < -1 & volcano_data2$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol2 <- ggplot(volcano_data2,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE45827 (LuminalB vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+print(p_vol2)
+
+ggsave(
+  "Volcano_GSE45827_LuminalB_HD.png",
+  plot = p_vol2,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# VOLCANO PLOT - GSE45827 (HER2)
+# ======================
+
+volcano_data2 <- data.frame(
+  logFC = res2_HER2$logFC,
+  adj.P.Val = res2_HER2$adj.P.Val,
+  Gene = res2_HER2$SYMBOL
+)
+
+volcano_data2$status <- "NO"
+
+volcano_data2$status[
+  volcano_data2$logFC > 1 & volcano_data2$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data2$status[
+  volcano_data2$logFC < -1 & volcano_data2$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol2 <- ggplot(volcano_data2,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE45827 (HER2 vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+print(p_vol2)
+
+ggsave(
+  "Volcano_GSE45827_HER2_HD.png",
+  plot = p_vol2,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# VOLCANO PLOT - GSE45827 (Basal ≈ TNBC)
+# ======================
+
+volcano_data2 <- data.frame(
+  logFC = res2_Basal$logFC,
+  adj.P.Val = res2_Basal$adj.P.Val,
+  Gene = res2_Basal$SYMBOL
+)
+
+volcano_data2$status <- "NO"
+
+volcano_data2$status[
+  volcano_data2$logFC > 1 & volcano_data2$adj.P.Val < 0.01
+] <- "UP"
+
+volcano_data2$status[
+  volcano_data2$logFC < -1 & volcano_data2$adj.P.Val < 0.01
+] <- "DOWN"
+
+p_vol2 <- ggplot(volcano_data2,
+                 aes(x = logFC,
+                     y = -log10(adj.P.Val),
+                     color = status)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("DOWN" = "blue",
+                                "NO" = "grey",
+                                "UP" = "red")) +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Volcano Plot - GSE45827 (Basal vs Normal)",
+    x = "Log2 Fold Change",
+    y = "-Log10(FDR)"
+  )
+
+print(p_vol2)
+
+ggsave(
+  "Volcano_GSE45827_Basal_HD.png",
+  plot = p_vol2,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+# ======================
+# 14. Output Excell
+# ======================
+
+if (!requireNamespace("openxlsx", quietly = TRUE)) {
+  install.packages("openxlsx")
+}
+
+library(openxlsx)
+
+# ======================
+# FILTER FUNCTION GSE65194
+# ======================
+
+filter_deg <- function(res_object) {
+  res_object$status <- "NO"
+  
+  res_object$status[res_object$logFC > 1 & res_object$adj.P.Val < 0.01] <- "UP"
+  res_object$status[res_object$logFC < -1 & res_object$adj.P.Val < 0.01] <- "DOWN"
+  
+  res_filtered <- res_object[res_object$status != "NO", ]
+  return(res_filtered)
+}
+
+# Filter semua subtype
+deg_LuminalA  <- filter_deg(res_LuminalA)
+deg_LuminalB  <- filter_deg(res_LuminalB)
+deg_HER2      <- filter_deg(res_HER2)
+deg_TNBC      <- filter_deg(res_TNBC)
+
+# Buat workbook
+wb1 <- createWorkbook()
+
+addWorksheet(wb1, "LuminalA")
+writeData(wb1, "LuminalA", deg_LuminalA)
+
+addWorksheet(wb1, "LuminalB")
+writeData(wb1, "LuminalB", deg_LuminalB)
+
+addWorksheet(wb1, "HER2")
+writeData(wb1, "HER2", deg_HER2)
+
+addWorksheet(wb1, "TNBC")
+writeData(wb1, "TNBC", deg_TNBC)
+
+# Simpan file
+saveWorkbook(wb1, "DEG_GSE65194.xlsx", overwrite = TRUE)
+
+# ======================
+# FILTER FUNCTION GSE45827
+# ======================
+
+# Filter semua subtype
+deg2_LuminalA  <- filter_deg(res2_LuminalA)
+deg2_LuminalB  <- filter_deg(res2_LuminalB)
+deg2_HER2      <- filter_deg(res2_HER2)
+deg2_Basal     <- filter_deg(res2_Basal)
+
+# Buat workbook
+wb2 <- createWorkbook()
+
+addWorksheet(wb2, "LuminalA")
+writeData(wb2, "LuminalA", deg2_LuminalA)
+
+addWorksheet(wb2, "LuminalB")
+writeData(wb2, "LuminalB", deg2_LuminalB)
+
+addWorksheet(wb2, "HER2")
+writeData(wb2, "HER2", deg2_HER2)
+
+addWorksheet(wb2, "Basal")
+writeData(wb2, "Basal", deg2_Basal)
+
+# Simpan file
+saveWorkbook(wb2, "DEG_GSE45827.xlsx", overwrite = TRUE)
+
+# ======================
+# 15. Venn Plot
+# ======================
+
+if (!requireNamespace("VennDiagram", quietly = TRUE)) {
+  install.packages("VennDiagram")
+}
+
+library(VennDiagram)
+library(grid)
+
+create_venn4 <- function(gene_lists, filename, title_plot) {
+  
+  library(VennDiagram)
+  library(grid)
+  
+  # Bersihkan NA & duplikat
+  gene_lists <- lapply(gene_lists, function(x) unique(na.omit(x)))
+  
+  # =========================
+  # SIMPAN FILE PNG HD
+  # =========================
+  venn.diagram(
+    x = gene_lists,
+    filename = filename,
+    imagetype = "png",
+    height = 3000,
+    width = 3000,
+    resolution = 300,
+    compression = "lzw",
+    main = title_plot,
+    main.cex = 2,
+    fill = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3"),
+    alpha = 0.5,
+    cex = 1.5,
+    cat.cex = 1.5
+  )
+  
+  # =========================
+  # TAMPILKAN DI PLOT
+  # =========================
+  venn_obj <- venn.diagram(
+    x = gene_lists,
+    filename = NULL,
+    main = title_plot,
+    main.cex = 1.5,
+    fill = c("#E41A1C", "#377EB8", "#4DAF4A", "#984EA3"),
+    alpha = 0.5,
+    cex = 1.2,
+    cat.cex = 1.2
+  )
+  
+  grid.newpage()
+  print(venn_obj)
+}
+#==============================
+#GSE65194
+#==============================
+
+#ALL================= 
+gene_list_all_65194 <- list(
+  LuminalA = rownames(deg_LuminalA),
+  LuminalB = rownames(deg_LuminalB),
+  HER2     = rownames(deg_HER2),
+  TNBC     = rownames(deg_TNBC)
+)
+
+create_venn4(
+  gene_list_all_65194,
+  "Venn_GSE65194_ALL.png",
+  "GSE65194 - ALL DEG"
+)
+
+#UP===================
+gene_list_up_65194 <- list(
+  LuminalA = rownames(deg_LuminalA[deg_LuminalA$status=="UP",]),
+  LuminalB = rownames(deg_LuminalB[deg_LuminalB$status=="UP",]),
+  HER2     = rownames(deg_HER2[deg_HER2$status=="UP",]),
+  TNBC     = rownames(deg_TNBC[deg_TNBC$status=="UP",])
+)
+
+create_venn4(
+  gene_list_up_65194,
+  "Venn_GSE65194_UP.png",
+  "GSE65194 - UP"
+)
+
+#DOWN===============
+gene_list_down_65194 <- list(
+  LuminalA = rownames(deg_LuminalA[deg_LuminalA$status=="DOWN",]),
+  LuminalB = rownames(deg_LuminalB[deg_LuminalB$status=="DOWN",]),
+  HER2     = rownames(deg_HER2[deg_HER2$status=="DOWN",]),
+  TNBC     = rownames(deg_TNBC[deg_TNBC$status=="DOWN",])
+)
+
+create_venn4(
+  gene_list_down_65194,
+  "Venn_GSE65194_DOWN.png",
+  "GSE65194 - DOWN"
+)
+
+#==============================
+#GSE45827
+#==============================
+
+#ALL===================
+gene_list_all_45827 <- list(
+  LuminalA = rownames(deg2_LuminalA),
+  LuminalB = rownames(deg2_LuminalB),
+  HER2     = rownames(deg2_HER2),
+  Basal    = rownames(deg2_Basal)
+)
+
+create_venn4(
+  gene_list_all_45827,
+  "Venn_GSE45827_ALL.png",
+  "GSE45827 - ALL DEG"
+)
+
+#UP===================
+gene_list_up_45827 <- list(
+  LuminalA = rownames(deg2_LuminalA[deg2_LuminalA$status == "UP", ]),
+  LuminalB = rownames(deg2_LuminalB[deg2_LuminalB$status == "UP", ]),
+  HER2     = rownames(deg2_HER2[deg2_HER2$status == "UP", ]),
+  Basal    = rownames(deg2_Basal[deg2_Basal$status == "UP", ])
+)
+
+create_venn4(
+  gene_list_up_45827,
+  "Venn_GSE45827_UP.png",
+  "GSE45827 - UP Regulated Genes"
+)
+
+#DOWN=================
+gene_list_down_45827 <- list(
+  LuminalA = rownames(deg2_LuminalA[deg2_LuminalA$status == "DOWN", ]),
+  LuminalB = rownames(deg2_LuminalB[deg2_LuminalB$status == "DOWN", ]),
+  HER2     = rownames(deg2_HER2[deg2_HER2$status == "DOWN", ]),
+  Basal    = rownames(deg2_Basal[deg2_Basal$status == "DOWN", ])
+)
+
+create_venn4(
+  gene_list_down_45827,
+  "Venn_GSE45827_DOWN.png",
+  "GSE45827 - DOWN Regulated Genes"
+)
+# ===========================
+#  16. Output excell
+# ===========================
+# ===========================
+#  Function untuk intersection exclusive
+# ===========================
+library(openxlsx)
+
+install.packages("gtools")  # Install package dulu
+library(gtools)             # Baru load package
+
+# x: list of gene vectors, names = subtypes
+create_exclusive_matrix <- function(x) {
+  require(gtools)  # untuk kombinasi
+  
+  subtypes <- names(x)
+  n <- length(subtypes)
+  
+  # Semua kombinasi dari 1 sampai n
+  combo_list <- list()
+  combo_names <- c()
+  
+  for (k in 1:n) {
+    cmb <- combinations(n, k, subtypes)
+    for (i in 1:nrow(cmb)) {
+      combo <- cmb[i, ]
+      combo_names <- c(combo_names, paste(combo, collapse="|"))
+      # Ambil gen yang ada di semua combo
+      inter_genes <- Reduce(intersect, x[combo])
+      # Hapus gen yang muncul di subtypes lain
+      other_subtypes <- setdiff(subtypes, combo)
+      if (length(other_subtypes) > 0) {
+        inter_genes <- setdiff(inter_genes, unique(unlist(x[other_subtypes])))
+      }
+      combo_list[[length(combo_list)+1]] <- inter_genes
+    }
+  }
+  
+  # Buat dataframe dengan kolom = combo names
+  max_len <- max(sapply(combo_list, length))
+  df <- as.data.frame(lapply(combo_list, function(v) {
+    length(v) <- max_len
+    return(v)
+  }))
+  
+  colnames(df) <- combo_names
+  return(df)
+}
+
+# ===========================
+#  Function export Excel
+# ===========================
+export_exclusive_excel <- function(gene_list, filename) {
+  df <- create_exclusive_matrix(gene_list)
+  wb <- createWorkbook()
+  addWorksheet(wb, "VennExclusive")
+  writeData(wb, sheet = 1, df)
+  saveWorkbook(wb, filename, overwrite = TRUE)
+}
+
+# ===========================
+#  Contoh pemakaian GSE65194
+# gene_list_all_65194, gene_list_up_65194, gene_list_down_65194
+# ===========================
+
+# ALL
+export_exclusive_excel(gene_list_all_65194, "GSE65194_ALL_Venn.xlsx")
+
+# UP
+export_exclusive_excel(gene_list_up_65194, "GSE65194_UP_Venn.xlsx")
+
+# DOWN
+export_exclusive_excel(gene_list_down_65194, "GSE65194_DOWN_Venn.xlsx")
+
+# ===========================
+#  Contoh pemakaian GSE45827
+# gene_list_all_45827, gene_list_up_45827, gene_list_down_45827
+# ===========================
+
+# ALL
+export_exclusive_excel(gene_list_all_45827, "GSE45827_ALL_Venn.xlsx")
+
+# UP
+export_exclusive_excel(gene_list_up_45827, "GSE45827_UP_Venn.xlsx")
+
+# DOWN
+export_exclusive_excel(gene_list_down_45827, "GSE45827_DOWN_Venn.xlsx")
+
+
+# ===========================
+#  17. Comparative dataset
+# ===========================
+
+library(openxlsx)
+library(dplyr)
+library(gtools)  # untuk kombinasi
+
+# ------------------------
+# Pastikan data DEG sudah ada
+# Kolom minimal: SYMBOL dan status ("UP"/"DOWN")
+# Dataset 1: GSE65194
+# Dataset 2: GSE45827 (Basal → TNBC)
+# ------------------------
+
+# Contoh:
+# deg_TNBC, deg_LuminalA, deg_LuminalB, deg_HER2
+# deg2_Basal, deg2_LuminalA, deg2_LuminalB, deg2_HER2
+
+# ------------------------
+# Buat list gen per dataset & per status
+# ------------------------
+
+# GSE65194
+gene_list_all_65194 <- list(
+  TNBC      = deg_TNBC$SYMBOL,
+  LuminalA  = deg_LuminalA$SYMBOL,
+  LuminalB  = deg_LuminalB$SYMBOL,
+  HER2      = deg_HER2$SYMBOL
+)
+gene_list_up_65194 <- list(
+  TNBC      = deg_TNBC$SYMBOL[deg_TNBC$status=="UP"],
+  LuminalA  = deg_LuminalA$SYMBOL[deg_LuminalA$status=="UP"],
+  LuminalB  = deg_LuminalB$SYMBOL[deg_LuminalB$status=="UP"],
+  HER2      = deg_HER2$SYMBOL[deg_HER2$status=="UP"]
+)
+gene_list_down_65194 <- list(
+  TNBC      = deg_TNBC$SYMBOL[deg_TNBC$status=="DOWN"],
+  LuminalA  = deg_LuminalA$SYMBOL[deg_LuminalA$status=="DOWN"],
+  LuminalB  = deg_LuminalB$SYMBOL[deg_LuminalB$status=="DOWN"],
+  HER2      = deg_HER2$SYMBOL[deg_HER2$status=="DOWN"]
+)
+
+# GSE45827 (map Basal → TNBC)
+gene_list_all_45827 <- list(
+  TNBC      = deg2_Basal$SYMBOL,
+  LuminalA  = deg2_LuminalA$SYMBOL,
+  LuminalB  = deg2_LuminalB$SYMBOL,
+  HER2      = deg2_HER2$SYMBOL
+)
+gene_list_up_45827 <- list(
+  TNBC      = deg2_Basal$SYMBOL[deg2_Basal$status=="UP"],
+  LuminalA  = deg2_LuminalA$SYMBOL[deg2_LuminalA$status=="UP"],
+  LuminalB  = deg2_LuminalB$SYMBOL[deg2_LuminalB$status=="UP"],
+  HER2      = deg2_HER2$SYMBOL[deg2_HER2$status=="UP"]
+)
+gene_list_down_45827 <- list(
+  TNBC      = deg2_Basal$SYMBOL[deg2_Basal$status=="DOWN"],
+  LuminalA  = deg2_LuminalA$SYMBOL[deg2_LuminalA$status=="DOWN"],
+  LuminalB  = deg2_LuminalB$SYMBOL[deg2_LuminalB$status=="DOWN"],
+  HER2      = deg2_HER2$SYMBOL[deg2_HER2$status=="DOWN"]
+)
+
+# ------------------------
+# Fungsi compare_genes
+# ------------------------
+compare_genes <- function(list1, list2, name1="Dataset1", name2="Dataset2") {
+  overlap <- intersect(list1, list2)
+  unique1 <- setdiff(list1, list2)
+  unique2 <- setdiff(list2, list1)
+  
+  max_len <- max(length(overlap), length(unique1), length(unique2))
+  df <- data.frame(
+    Overlap = c(overlap, rep(NA, max_len - length(overlap))),
+    setNames(list(c(unique1, rep(NA, max_len - length(unique1)))), paste0("Unique_", name1)),
+    setNames(list(c(unique2, rep(NA, max_len - length(unique2)))), paste0("Unique_", name2))
+  )
+  return(df)
+}
+
+# ------------------------
+# Fungsi export_comparison_excel per subtype
+# ------------------------
+export_comparison_excel <- function(list1, list2, filename){
+  wb <- createWorkbook()
+  for(subtype in names(list1)){
+    df <- compare_genes(list1[[subtype]], list2[[subtype]], "GSE65194", "GSE45827")
+    addWorksheet(wb, sheetName = subtype)
+    writeData(wb, sheet = subtype, df)
+  }
+  saveWorkbook(wb, file = filename, overwrite = TRUE)
+}
+
+# ------------------------
+# Export ALL, UP, DOWN
+# ------------------------
+export_comparison_excel(gene_list_all_65194, gene_list_all_45827, "Comparative_ALL.xlsx")
+export_comparison_excel(gene_list_up_65194, gene_list_up_45827, "Comparative_UP.xlsx")
+export_comparison_excel(gene_list_down_65194, gene_list_down_45827, "Comparative_DOWN.xlsx")
+
+cat("✅ Export selesai: Comparative_ALL/UP/DOWN.xlsx\n")
+
+# ===========================
+#  18. Enrichment
+# ===========================
+
+library(dplyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(openxlsx)
+
+# ===========================
+# FUNCTION ENRICHMENT PER FILE
+# ===========================
+
+run_enrichment_from_excel <- function(input_file, output_file){
+  
+  sheets <- getSheetNames(input_file)
+  
+  # ------------------------
+  # Ambil overlap genes
+  # ------------------------
+  overlap_genes <- list()
+  
+  for(sheet in sheets){
+    df <- read.xlsx(input_file, sheet = sheet)
+    overlap_genes[[sheet]] <- na.omit(df$Overlap)
+  }
+  
+  # ------------------------
+  # Mapping SYMBOL → ENTREZ
+  # ------------------------
+  map_to_entrez <- function(genes){
+    mapped <- bitr(genes,
+                   fromType="SYMBOL",
+                   toType="ENTREZID",
+                   OrgDb=org.Hs.eg.db)
+    unique(mapped$ENTREZID)
+  }
+  
+  overlap_entrez <- lapply(overlap_genes, map_to_entrez)
+  
+  # ------------------------
+  # GO
+  # ------------------------
+  go_results <- list()
+  
+  for(subtype in names(overlap_entrez)){
+    genes <- overlap_entrez[[subtype]]
+    
+    if(length(genes) > 0){
+      ego <- enrichGO(
+        gene          = genes,
+        OrgDb         = org.Hs.eg.db,
+        keyType       = "ENTREZID",
+        ont           = "BP",
+        pAdjustMethod = "BH",
+        qvalueCutoff  = 0.05,
+        readable      = TRUE
+      )
+      go_results[[subtype]] <- ego
+    } else {
+      go_results[[subtype]] <- NULL
+    }
+  }
+  
+  # ------------------------
+  # KEGG
+  # ------------------------
+  kegg_results <- list()
+  
+  for(subtype in names(overlap_entrez)){
+    genes <- overlap_entrez[[subtype]]
+    
+    if(length(genes) > 0){
+      ekegg <- enrichKEGG(
+        gene          = genes,
+        organism      = "hsa",
+        pAdjustMethod = "BH",
+        qvalueCutoff  = 0.05
+      )
+      kegg_results[[subtype]] <- ekegg
+    } else {
+      kegg_results[[subtype]] <- NULL
+    }
+  }
+  
+  # ------------------------
+  # Export Excel
+  # ------------------------
+  wb <- createWorkbook()
+  
+  for(subtype in names(go_results)){
+    
+    # GO
+    if(!is.null(go_results[[subtype]]) &&
+       nrow(go_results[[subtype]]@result) > 0){
+      
+      addWorksheet(wb, paste0(subtype, "_GO"))
+      writeData(wb,
+                sheet = paste0(subtype, "_GO"),
+                go_results[[subtype]]@result)
+    }
+    
+    # KEGG
+    if(!is.null(kegg_results[[subtype]]) &&
+       nrow(kegg_results[[subtype]]@result) > 0){
+      
+      addWorksheet(wb, paste0(subtype, "_KEGG"))
+      writeData(wb,
+                sheet = paste0(subtype, "_KEGG"),
+                kegg_results[[subtype]]@result)
+    }
+  }
+  
+  saveWorkbook(wb, output_file, overwrite = TRUE)
+  
+  cat("✅ Enrichment selesai:", output_file, "\n")
+}
+
+# ===========================
+# JALANKAN UNTUK 3 FILE
+# ===========================
+
+run_enrichment_from_excel("Comparative_ALL.xlsx",
+                          "Overlap_Enrichment_ALL.xlsx")
+
+run_enrichment_from_excel("Comparative_UP.xlsx",
+                          "Overlap_Enrichment_UP.xlsx")
+
+run_enrichment_from_excel("Comparative_DOWN.xlsx",
+                          "Overlap_Enrichment_DOWN.xlsx")
+
+up_sheets   <- getSheetNames("Comparative_UP.xlsx")
+down_sheets <- getSheetNames("Comparative_DOWN.xlsx")
+
+read.xlsx("Comparative_UP.xlsx", sheet = up_sheets[1])[1:5,]
+read.xlsx("Comparative_DOWN.xlsx", sheet = down_sheets[1])[1:5,]
+
+getSheetNames("Overlap_Enrichment_UP.xlsx")
+getSheetNames("Overlap_Enrichment_DOWN.xlsx")
+
+head(read.xlsx("Overlap_Enrichment_UP.xlsx", sheet = "TNBC_GO"))
+head(read.xlsx("Overlap_Enrichment_DOWN.xlsx", sheet = "TNBC_GO"))
+
+print(head(df_top$Description))
+
+# ===============================
+# GO TOP 20 BP - UP & DOWN
+# ===============================
+# ===============================
+# FUNGSI ENRICHMENT + VISUAL
+# ===============================
+
+run_go_visual <- function(excel_file, output_folder){
+  
+  if(!dir.exists(output_folder)){
+    dir.create(output_folder)
+  }
+  
+  sheets <- getSheetNames(excel_file)
+  
+  for(sheet in sheets){
+    
+    df <- read.xlsx(excel_file, sheet = sheet)
+    
+    genes <- na.omit(df$Overlap)
+    
+    if(length(genes) > 0){
+      
+      # Mapping ke ENTREZ
+      mapped <- bitr(genes,
+                     fromType="SYMBOL",
+                     toType="ENTREZID",
+                     OrgDb=org.Hs.eg.db)
+      
+      if(nrow(mapped) > 0){
+        
+        ego <- enrichGO(
+          gene          = mapped$ENTREZID,
+          OrgDb         = org.Hs.eg.db,
+          keyType       = "ENTREZID",
+          ont           = "BP",
+          pAdjustMethod = "BH",
+          qvalueCutoff  = 0.05,
+          readable      = TRUE
+        )
+        
+        if(!is.null(ego) && nrow(ego@result) > 0){
+          
+          go_df <- ego@result
+          
+          # Top 20 paling signifikan
+          go_top20 <- go_df %>%
+            arrange(p.adjust) %>%
+            head(20)
+          
+          # Convert GeneRatio ke numeric
+          go_top20$GeneRatioNum <- sapply(go_top20$GeneRatio, function(x){
+            eval(parse(text = x))
+          })
+          
+          # Urutkan berdasarkan GeneRatio (terbesar di atas)
+          go_top20 <- go_top20 %>%
+            arrange(GeneRatioNum)
+          
+          go_top20$Description <- factor(go_top20$Description,
+                                         levels = go_top20$Description)
+          
+          # Plot
+          p <- ggplot(go_top20,
+                      aes(x = GeneRatioNum,
+                          y = Description,
+                          size = Count,
+                          color = p.adjust)) +
+            geom_point() +
+            scale_color_gradient(low = "red", high = "blue") +
+            theme_minimal(base_size = 14) +
+            labs(
+              title = paste("GO BP Top 20 -", sheet),
+              x = "Gene Ratio",
+              y = "GO Term",
+              color = "Adj P-value",
+              size = "Gene Count"
+            )
+          
+          print(p)
+          
+          # Save PNG
+          ggsave(
+            filename = file.path(output_folder,
+                                 paste0("GO_BP_Top20_", sheet, ".png")),
+            plot = p,
+            width = 10,
+            height = 8,
+            dpi = 300
+          )
+        }
+      }
+    }
+  }
+}
+
+# ===============================
+# JALANKAN UNTUK UP & DOWN
+# ===============================
+
+run_go_visual("Comparative_UP.xlsx", "GO_Top20_UP")
+run_go_visual("Comparative_DOWN.xlsx", "GO_Top20_DOWN")
+
+cat("✅ GO Top 20 BP (UP & DOWN) selesai dan tersimpan di folder terpisah.\n")
+
+# ===============================
+# KEGG TOP 20 - UP & DOWN
+# ===============================
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(openxlsx)
+library(dplyr)
+library(ggplot2)
+
+run_kegg_visual <- function(excel_file, output_folder){
+  
+  if(!dir.exists(output_folder)){
+    dir.create(output_folder)
+  }
+  
+  sheets <- getSheetNames(excel_file)
+  
+  for(sheet in sheets){
+    
+    df <- read.xlsx(excel_file, sheet = sheet)
+    
+    genes <- na.omit(df$Overlap)
+    
+    if(length(genes) > 0){
+      
+      # Mapping ke ENTREZ
+      mapped <- bitr(genes,
+                     fromType="SYMBOL",
+                     toType="ENTREZID",
+                     OrgDb=org.Hs.eg.db)
+      
+      if(nrow(mapped) > 0){
+        
+        ekegg <- enrichKEGG(
+          gene         = mapped$ENTREZID,
+          organism     = "hsa",
+          pAdjustMethod= "BH",
+          qvalueCutoff = 0.05
+        )
+        
+        if(!is.null(ekegg) && nrow(ekegg@result) > 0){
+          
+          kegg_df <- ekegg@result
+          
+          # Top 20 berdasarkan signifikansi
+          kegg_top20 <- kegg_df %>%
+            arrange(p.adjust) %>%
+            head(20)
+          
+          # Convert GeneRatio ke numeric
+          kegg_top20$GeneRatioNum <- sapply(kegg_top20$GeneRatio, function(x){
+            eval(parse(text = x))
+          })
+          
+          # Urutkan berdasarkan GeneRatio (terbesar di atas)
+          kegg_top20 <- kegg_top20 %>%
+            arrange(GeneRatioNum)
+          
+          kegg_top20$Description <- factor(kegg_top20$Description,
+                                           levels = kegg_top20$Description)
+          
+          # Plot
+          p <- ggplot(kegg_top20,
+                      aes(x = GeneRatioNum,
+                          y = Description,
+                          size = Count,
+                          color = p.adjust)) +
+            geom_point() +
+            scale_color_gradient(low = "red", high = "blue") +
+            theme_minimal(base_size = 14) +
+            labs(
+              title = paste("KEGG Top 20 -", sheet),
+              x = "Gene Ratio",
+              y = "KEGG Pathway",
+              color = "Adj P-value",
+              size = "Gene Count"
+            )
+          
+          print(p)
+          
+          # Save PNG
+          ggsave(
+            filename = file.path(output_folder,
+                                 paste0("KEGG_Top20_", sheet, ".png")),
+            plot = p,
+            width = 10,
+            height = 8,
+            dpi = 300
+          )
+        }
+      }
+    }
+  }
+}
+
+# ===============================
+# JALANKAN
+# ===============================
+
+run_kegg_visual("Comparative_UP.xlsx", "KEGG_Top20_UP")
+run_kegg_visual("Comparative_DOWN.xlsx", "KEGG_Top20_DOWN")
+
+cat("✅ KEGG Top 20 UP & DOWN selesai dan tersimpan di folder terpisah.\n")
+
+# ===============================
+# 19. GSEA Compare
+# ===============================
+# ================================
+# LOAD LIBRARY
+# ================================
+
+library(openxlsx)
+library(dplyr)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(ggplot2)
+
+# ================================
+# FILE INPUT
+# ================================
+
+comp_file <- "Comparative_ALL.xlsx"
+deg1_file <- "DEG_GSE65194.xlsx"
+deg2_file <- "DEG_GSE45827.xlsx"
+
+# ================================
+# FUNCTION PROCESS COMPARATIVE
+# ================================
+
+process_comparative <- function(comp_file, deg1_file, deg2_file){
+  
+  sheets <- getSheetNames(comp_file)
+  
+  result_list <- list()
+  gsea_kegg_list <- list()
+  gsea_go_list <- list()
+  
+  for(sheet in sheets){
+    
+    cat("Processing:", sheet, "\n")
+    
+    sheet_deg1 <- sheet
+    sheet_deg2 <- ifelse(sheet == "TNBC", "Basal", sheet)
+    
+    # ================================
+    # READ OVERLAP GENES
+    # ================================
+    
+    overlap_genes <- read.xlsx(comp_file, sheet = sheet) %>%
+      pull(Overlap) %>%
+      na.omit()
+    
+    # ================================
+    # READ DEG DATA
+    # ================================
+    
+    deg1 <- read.xlsx(deg1_file, sheet = sheet_deg1)
+    deg2 <- read.xlsx(deg2_file, sheet = sheet_deg2)
+    
+    # ================================
+    # FILTER OVERLAP
+    # ================================
+    
+    deg1_overlap <- deg1 %>%
+      dplyr::filter(SYMBOL %in% overlap_genes) %>%
+      dplyr::select(SYMBOL, logFC) %>%
+      dplyr::rename(Symbol = SYMBOL,
+                    logFC_1 = logFC)
+    
+    deg2_overlap <- deg2 %>%
+      dplyr::filter(SYMBOL %in% overlap_genes) %>%
+      dplyr::select(SYMBOL, logFC) %>%
+      dplyr::rename(Symbol = SYMBOL,
+                    logFC_2 = logFC)
+    deg1 <- read.xlsx(deg1_file, sheet = sheet_deg1) %>% dplyr::as_tibble()
+    deg2 <- read.xlsx(deg2_file, sheet = sheet_deg2) %>% dplyr::as_tibble()
+    # ================================
+    # MERGE DATASET
+    # ================================
+    
+    merged <- inner_join(deg1_overlap, deg2_overlap, by = "Symbol")
+    
+    # ================================
+    # BUAT RANKING GENE
+    # (Mean logFC dua dataset)
+    # ================================
+    
+    ranked <- merged %>%
+      mutate(mean_logFC = (logFC_1 + logFC_2) / 2)
+    
+    geneList <- ranked$mean_logFC
+    names(geneList) <- ranked$Symbol
+    
+    geneList <- sort(geneList, decreasing = TRUE)
+    
+    # ================================
+    # CONVERT SYMBOL → ENTREZ
+    # ================================
+    
+    gene_df <- bitr(names(geneList),
+                    fromType = "SYMBOL",
+                    toType = "ENTREZID",
+                    OrgDb = org.Hs.eg.db)
+    
+    geneList <- geneList[gene_df$SYMBOL]
+    names(geneList) <- gene_df$ENTREZID
+    
+    geneList <- sort(geneList, decreasing = TRUE)
+    
+    # ================================
+    # GSEA KEGG
+    # ================================
+    
+    gsea_kegg <- gseKEGG(
+      geneList = geneList,
+      organism = "hsa",
+      pvalueCutoff = 0.05,
+      verbose = FALSE
+    )
+    
+    # ================================
+    # GSEA GO
+    # ================================
+    
+    gsea_go <- gseGO(
+      geneList = geneList,
+      OrgDb = org.Hs.eg.db,
+      ont = "ALL",
+      keyType = "ENTREZID",
+      pvalueCutoff = 0.05,
+      verbose = FALSE
+    )
+    
+    # ================================
+    # SAVE RESULT
+    # ================================
+    
+    result_list[[sheet]] <- ranked
+    gsea_kegg_list[[sheet]] <- gsea_kegg
+    gsea_go_list[[sheet]] <- gsea_go
+    
+  }
+  
+  return(list(
+    ranked_genes = result_list,
+    gsea_kegg = gsea_kegg_list,
+    gsea_go = gsea_go_list
+  ))
+}
+
+# ================================
+# RUN ANALYSIS
+# ================================
+
+results <- process_comparative(comp_file, deg1_file, deg2_file)
+
+# ================================
+output_dir <- "GSEA compare"
+
+if(!dir.exists(output_dir)){
+  dir.create(output_dir)
+}
+
+for(sheet in names(results$gsea_kegg)){
+  
+  kegg <- as.data.frame(results$gsea_kegg[[sheet]])
+  go   <- as.data.frame(results$gsea_go[[sheet]])
+  
+  write.xlsx(
+    list(
+      KEGG = kegg,
+      GO   = go
+    ),
+    file = file.path(output_dir, paste0("GSEA_", sheet, ".xlsx")),
+    overwrite = TRUE
+  )
+}
+# ================================
+# CONTOH MELIHAT HASIL
+# ================================
+
+results$gsea_kegg[[1]] %>% head()
+
+results$gsea_go[[1]] %>% head()
+
+# ================================
+# VISUALISASI
+# ================================
+
+dotplot(results$gsea_kegg[[1]], showCategory = 20)
+
+ridgeplot(results$gsea_go[[1]])
+
+gseaplot2(results$gsea_kegg[[1]], geneSetID = 1)
+
+
+# ================================
+# KEGG dotplot
+# ================================
+
+library(ggplot2)
+library(enrichplot)
+
+for(sheet in names(results$gsea_kegg)){
+  
+  gsea_obj <- results$gsea_kegg[[sheet]]
+  
+  df <- as.data.frame(gsea_obj)
+  
+  if(nrow(df) > 0){
+    
+    # Top 20 signifikan
+    top20 <- df[order(df$p.adjust), ]
+    top20 <- head(top20, 20)
+    
+    # urut berdasarkan jumlah gen
+    top20 <- top20[order(top20$setSize, decreasing = TRUE), ]
+    
+    # wrap label pathway
+    top20$Description <- stringr::str_wrap(top20$Description, width = 40)
+    
+    gsea_subset <- gsea_obj
+    gsea_subset@result <- top20
+    
+    p <- dotplot(
+      gsea_subset,
+      showCategory = 20,
+      title = paste("GSEA KEGG -", sheet)
+    ) +
+      theme(
+        axis.text.y = element_text(size = 8)
+      )
+    
+    ggsave(
+      filename = file.path(output_dir,
+                           paste0("KEGG_dotplot_", sheet, ".png")),
+      plot = p,
+      width = 9,
+      height = 7,
+      dpi = 300
+    )
+    
+  }
+}
+#================================
+# GO dotplot
+# ===============================
+
+  for(sheet in names(results$gsea_go)){
+    
+    gsea_obj <- results$gsea_go[[sheet]]
+    
+    df <- as.data.frame(gsea_obj)
+    
+    if(nrow(df) > 0){
+      
+      # top 20 signifikan
+      top20 <- df[order(df$p.adjust), ]
+      top20 <- head(top20, 20)
+      
+      # urut berdasarkan jumlah gen
+      top20 <- top20[order(top20$setSize, decreasing = TRUE), ]
+      
+      gsea_subset <- gsea_obj
+      gsea_subset@result <- top20
+      
+      p <- dotplot(
+        gsea_subset,
+        showCategory = 20,
+        title = paste("GSEA GO -", sheet)
+      ) +
+        theme(
+          axis.text.y = element_text(size = 8),
+          plot.margin = margin(
+            t = 10,
+            r = 10,
+            b = 10,
+            l = 220   # ruang kiri diperbesar agar teks memanjang
+          )
+        )
+      
+      ggsave(
+        filename = file.path(
+          output_dir,
+          paste0("GO_dotplot_", sheet, ".png")
+        ),
+        plot = p,
+        width = 12,   # plot dibuat lebih lebar
+        height = 8,
+        dpi = 300
+      )
+      
+    }
+  }
+#===============================
+# Bar-NES
+# ==============================
+
+  plot_gsea_bar <- function(gsea_obj, sheet_name, type){
+    
+    df <- as.data.frame(gsea_obj)
+    
+    if(nrow(df) == 0) return(NULL)
+    
+    # Top 20 paling signifikan
+    top20 <- df[order(df$p.adjust), ]
+    top20 <- head(top20, 20)
+    
+    # klasifikasi activated vs suppressed
+    top20$Direction <- ifelse(top20$NES > 0, "Activated", "Suppressed")
+    
+    # wrap label pathway agar tidak menumpuk
+    top20$Description <- stringr::str_wrap(top20$Description, width = 40)
+    
+    p <- ggplot(top20,
+                aes(x = reorder(Description, NES),
+                    y = NES,
+                    fill = Direction)) +
+      
+      geom_bar(stat = "identity") +
+      
+      coord_flip() +
+      
+      scale_fill_manual(values = c(
+        Activated = "#D55E00",
+        Suppressed = "#0072B2"
+      )) +
+      
+      labs(
+        title = paste(type, "GSEA NES -", sheet_name),
+        x = "Pathway",
+        y = "Normalized Enrichment Score (NES)"
+      ) +
+      
+      theme_minimal(base_size = 11) +
+      
+      theme(
+        axis.text.y = element_text(size = 8),
+        plot.title = element_text(face = "bold")
+      )
+    
+    ggsave(
+      filename = file.path(output_dir,
+                           paste0(type,"_NES_barplot_",sheet_name,".png")),
+      plot = p,
+      width = 9,
+      height = 7,
+      dpi = 300
+    )
+  }
+
+for(sheet in names(results$gsea_kegg)){
+  
+  plot_gsea_bar(
+    gsea_obj = results$gsea_kegg[[sheet]],
+    sheet_name = sheet,
+    type = "KEGG"
+  )
+  
+}
+
+for(sheet in names(results$gsea_go)){
+  
+  plot_gsea_bar(
+    gsea_obj = results$gsea_go[[sheet]],
+    sheet_name = sheet,
+    type = "GO"
+  )
+  
+}
+
