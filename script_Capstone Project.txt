@@ -155,7 +155,7 @@ fdata1 <- fData(gset1)
 # Ambil gene symbol
 gene_symbols1 <- fdata1$`Gene symbol`
 
-# 🔥 CLEAN multi-gene DULU
+# CLEAN multi-gene DULU
 gene_symbols1_clean <- sapply(strsplit(gene_symbols1, "///"), `[`, 1)
 
 # Trim spasi
@@ -184,7 +184,7 @@ fdata2 <- fData(gset2)
 
 gene_symbols2 <- fdata2$`Gene symbol`
 
-# 🔥 CLEAN multi-gene DULU
+# CLEAN multi-gene DULU
 gene_symbols2_clean <- sapply(strsplit(gene_symbols2, "///"), `[`, 1)
 gene_symbols2_clean <- trimws(gene_symbols2_clean)
 
@@ -247,7 +247,7 @@ table(gset2$group)
 # ======================
 
 #karena dataset mencakup sel line, maka perlu filter sampel
-group_raw1 <- as.character(gset1$group)   # 🔴 ubah ke character dulu
+group_raw1 <- as.character(gset1$group)   #  ubah ke character dulu
 
 keep1 <- group_raw1 %in% c(
   "Breast tumor sample from IHC defined Luminal A subgroup",
@@ -383,16 +383,16 @@ expr_gse65194   <- ex1_gene_filtered
 design_gse65194 <- design1
 contrast_gse65194 <- contrast1
 
-# 1.Fit linear model
+# Fit linear model
 fit1 <- lmFit(ex1_gene_filtered, design1)
 
-# 2.Apply contrast matrix (yang sudah kita buat tadi)
+# Apply contrast matrix (yang sudah kita buat tadi)
 fit1_contrast <- contrasts.fit(fit1, contrast1)
 
-# 3️.Empirical Bayes
+# Empirical Bayes
 fit1_contrast <- eBayes(fit1_contrast)
 
-# 4️.Ambil hasil per subtype
+# Ambil hasil per subtype
 res_LuminalA  <- topTable(fit1_contrast,
                           coef="LuminalA_vs_Normal",
                           adjust="fdr",
@@ -434,16 +434,16 @@ expr_gse45827     <- ex2_gene_filtered
 design_gse45827   <- design2
 contrast_gse45827 <- contrast2
 
-# 1. Fit model
+# Fit model
 fit_gse45827 <- lmFit(expr_gse45827, design_gse45827)
 
-# 2️.Apply contrast
+# Apply contrast
 fit_gse45827 <- contrasts.fit(fit_gse45827, contrast_gse45827)
 
-# 3️.Empirical Bayes
+# Empirical Bayes
 fit_gse45827 <- eBayes(fit_gse45827)
 
-# 4️.Ambil hasil per subtype
+# Ambil hasil per subtype
 res2_LuminalA <- topTable(fit_gse45827,
                           coef="LuminalA_vs_Normal",
                           adjust="fdr",
@@ -1369,7 +1369,6 @@ export_exclusive_excel(gene_list_up_45827, "GSE45827_UP_Venn.xlsx")
 # DOWN
 export_exclusive_excel(gene_list_down_45827, "GSE45827_DOWN_Venn.xlsx")
 
-
 # ===========================
 #  17. Comparative dataset
 # ===========================
@@ -1470,7 +1469,7 @@ export_comparison_excel(gene_list_all_65194, gene_list_all_45827, "Comparative_A
 export_comparison_excel(gene_list_up_65194, gene_list_up_45827, "Comparative_UP.xlsx")
 export_comparison_excel(gene_list_down_65194, gene_list_down_45827, "Comparative_DOWN.xlsx")
 
-cat("✅ Export selesai: Comparative_ALL/UP/DOWN.xlsx\n")
+cat("Export selesai: Comparative_ALL/UP/DOWN.xlsx\n")
 
 # ===========================
 #  18. Enrichment
@@ -1588,7 +1587,7 @@ run_enrichment_from_excel <- function(input_file, output_file){
   
   saveWorkbook(wb, output_file, overwrite = TRUE)
   
-  cat("✅ Enrichment selesai:", output_file, "\n")
+  cat("Enrichment selesai:", output_file, "\n")
 }
 
 # ===========================
@@ -1721,7 +1720,7 @@ run_go_visual <- function(excel_file, output_folder){
 run_go_visual("Comparative_UP.xlsx", "GO_Top20_UP")
 run_go_visual("Comparative_DOWN.xlsx", "GO_Top20_DOWN")
 
-cat("✅ GO Top 20 BP (UP & DOWN) selesai dan tersimpan di folder terpisah.\n")
+cat("GO Top 20 BP (UP & DOWN) selesai dan tersimpan di folder terpisah.\n")
 
 # ===============================
 # KEGG TOP 20 - UP & DOWN
@@ -1826,7 +1825,7 @@ run_kegg_visual <- function(excel_file, output_folder){
 run_kegg_visual("Comparative_UP.xlsx", "KEGG_Top20_UP")
 run_kegg_visual("Comparative_DOWN.xlsx", "KEGG_Top20_DOWN")
 
-cat("✅ KEGG Top 20 UP & DOWN selesai dan tersimpan di folder terpisah.\n")
+cat("KEGG Top 20 UP & DOWN selesai dan tersimpan di folder terpisah.\n")
 
 # ===============================
 # 19. GSEA Compare
@@ -2195,4 +2194,5 @@ for(sheet in names(results$gsea_go)){
   )
   
 }
+
 
