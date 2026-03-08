@@ -1,0 +1,4 @@
+karena ukuran data set melebihi 25 mb sehingga dataset tidak bisa diupload di GitHUB. 
+alternatif upload menggunakan drive
+
+https://drive.google.com/drive/folders/1rRhSHCwzXRlCfY_q1WWF3S_CxAdkQR4i?usp=drive_link
